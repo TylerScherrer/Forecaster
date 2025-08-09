@@ -3,7 +3,13 @@
 import { useEffect, useState } from "react";
 import StoreSelector from "../components/StoreSelector";
 import { fetchStores } from "../api/storeService";
-import { Flex, IconButton, Text } from "@chakra-ui/react";
+import {
+  Flex,
+  IconButton,
+  Text,
+  Box,
+  Container
+} from "@chakra-ui/react";
 import { ArrowBackIcon, ArrowForwardIcon } from "@chakra-ui/icons";
 import ForecastChart from "../components/ForecastChart";
 import CategoryBreakdownChart from "../components/CategoryBreakdownChart";
@@ -23,14 +29,12 @@ export default function Home() {
   const graphViews = ["total", "category"];
   const [graphViewIndex, setGraphViewIndex] = useState(0);
 
-  // Fetch all stores on load
   useEffect(() => {
     fetchStores()
       .then((data) => setStoreList(data))
       .catch((err) => console.error("❌ Failed to load stores:", err));
   }, []);
 
-  // Fetch forecast and history when store changes
   useEffect(() => {
     if (!selectedStore) return;
 
@@ -68,43 +72,81 @@ export default function Home() {
     setLoadingInsight(false);
   };
 
-  return (
-    <>
-      <StoreSelector
-        storeList={storeList}
-        selectedStore={selectedStore}
-        setSelectedStore={setSelectedStore}
-      />
+  const handleGraphViewChange = (direction) => {
+    const nextIndex =
+      direction === "prev"
+        ? (graphViewIndex - 1 + graphViews.length) % graphViews.length
+        : (graphViewIndex + 1) % graphViews.length;
+    setGraphViewIndex(nextIndex);
+    fetchAIInsight(timeline); // Refresh insight when view changes
+  };
 
-      <Flex justify="center" align="center" mt={4} mb={2}>
+  const forecastValue = (() => {
+    if (!forecast) return null;
+    if (Array.isArray(forecast)) return forecast[0]?.sales ?? null; // current API
+    // legacy shapes, just in case
+    return forecast.sales ?? forecast.Sales ?? null;
+  })();
+
+  return (
+    <Container maxW="6xl" py={8}>
+      <Box mb={6}>
+        <StoreSelector
+          storeList={storeList}
+          selectedStore={selectedStore}
+          setSelectedStore={setSelectedStore}
+        />
+      </Box>
+
+      <Flex justify="center" align="center" mt={4} mb={4}>
         <IconButton
           icon={<ArrowBackIcon />}
-          onClick={() =>
-            setGraphViewIndex((graphViewIndex - 1 + graphViews.length) % graphViews.length)
-          }
+          onClick={() => handleGraphViewChange("prev")}
           aria-label="Previous View"
           mr={2}
         />
-        <Text fontWeight="bold">
+        <Text fontWeight="bold" fontSize="lg">
           {graphViews[graphViewIndex] === "total"
             ? "Total Sales Forecast"
             : "Category Breakdown"}
         </Text>
         <IconButton
           icon={<ArrowForwardIcon />}
-          onClick={() => setGraphViewIndex((graphViewIndex + 1) % graphViews.length)}
+          onClick={() => handleGraphViewChange("next")}
           aria-label="Next View"
           ml={2}
         />
       </Flex>
 
-      {graphViews[graphViewIndex] === "total" ? (
-        <ForecastChart history={history} forecast={forecast} />
-      ) : (
-        <CategoryBreakdownChart history={history} />
-      )}
+      <Box
+        mb={6}
+        p={4}
+        borderWidth="1px"
+        borderRadius="lg"
+        bg="white"
+        boxShadow="md"
+        textAlign="center"
+      >
+        <Text fontSize="2xl" fontWeight="bold" color="green.500">
+          {forecastValue != null
+            ? `$${forecastValue.toLocaleString(undefined, {
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 2,
+              })}`
+            : "--"}
+        </Text>
+
+      </Box>
+
+      <Box mb={6}>
+        {graphViews[graphViewIndex] === "total" ? (
+          <ForecastChart history={history} forecast={forecast} />
+        ) : (
+          <CategoryBreakdownChart history={history} />
+        )}
+      </Box>
 
       <AIInsight summary={summary} loading={loadingInsight} />
-    </>
+    </Container>
   );
 }
