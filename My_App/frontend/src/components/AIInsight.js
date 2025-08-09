@@ -1,11 +1,19 @@
 // src/components/AIInsight.js
-
 import { Box, Text, Spinner } from "@chakra-ui/react";
 
-function AIInsight({ summary, loading }) {
+export default function AIInsight({ summary, loading, boxProps = {} }) {
   return (
-    <Box mt={4} p={4} borderWidth="1px" borderRadius="lg" bg="gray.50">
-      <Text fontWeight="bold" mb={2}>AI Insight:</Text>
+    <Box
+      p={4}
+      borderWidth="1px"
+      borderRadius="lg"
+      bg="white"
+      boxShadow="sm"
+      {...boxProps}
+    >
+      <Text fontWeight="bold" mb={2}>
+        AI Insight
+      </Text>
       {loading ? (
         <Spinner size="sm" />
       ) : (
@@ -14,5 +22,3 @@ function AIInsight({ summary, loading }) {
     </Box>
   );
 }
-
-export default AIInsight;

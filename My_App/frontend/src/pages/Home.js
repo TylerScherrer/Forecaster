@@ -1,14 +1,11 @@
 // src/pages/Home.js
-
 import { useEffect, useState } from "react";
 import StoreSelector from "../components/StoreSelector";
 import { fetchStores } from "../api/storeService";
 import {
-  Flex,
-  IconButton,
-  Text,
-  Box,
-  Container
+  Box, Container, Flex, IconButton, Text,
+  Grid, GridItem, Button, useDisclosure, Drawer, DrawerBody,
+  DrawerContent, DrawerHeader, DrawerOverlay
 } from "@chakra-ui/react";
 import { ArrowBackIcon, ArrowForwardIcon } from "@chakra-ui/icons";
 import ForecastChart from "../components/ForecastChart";
@@ -28,6 +25,7 @@ export default function Home() {
 
   const graphViews = ["total", "category"];
   const [graphViewIndex, setGraphViewIndex] = useState(0);
+  const drawer = useDisclosure();
 
   useEffect(() => {
     fetchStores()
@@ -62,7 +60,6 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ timeline: timelineData }),
       });
-
       const data = await res.json();
       setSummary(data.summary || "No insight available.");
     } catch (err) {
@@ -73,80 +70,112 @@ export default function Home() {
   };
 
   const handleGraphViewChange = (direction) => {
-    const nextIndex =
+    const next =
       direction === "prev"
         ? (graphViewIndex - 1 + graphViews.length) % graphViews.length
         : (graphViewIndex + 1) % graphViews.length;
-    setGraphViewIndex(nextIndex);
-    fetchAIInsight(timeline); // Refresh insight when view changes
+    setGraphViewIndex(next);
+    fetchAIInsight(timeline);
   };
 
-  const forecastValue = (() => {
-    if (!forecast) return null;
-    if (Array.isArray(forecast)) return forecast[0]?.sales ?? null; // current API
-    // legacy shapes, just in case
-    return forecast.sales ?? forecast.Sales ?? null;
-  })();
-
   return (
-    <Container maxW="6xl" py={8}>
-      <Box mb={6}>
-        <StoreSelector
-          storeList={storeList}
-          selectedStore={selectedStore}
-          setSelectedStore={setSelectedStore}
-        />
-      </Box>
+    <Container maxW="7xl" py={8}>
+      <Grid templateColumns={{ base: "1fr", lg: "2fr 1fr" }} gap={6} alignItems="start">
+        {/* LEFT: controls, KPI, charts */}
+        <GridItem>
+          {/* Store selector */}
+          <Box mb={6}>
+            <StoreSelector
+              storeList={storeList}
+              selectedStore={selectedStore}
+              setSelectedStore={setSelectedStore}
+            />
+          </Box>
 
-      <Flex justify="center" align="center" mt={4} mb={4}>
-        <IconButton
-          icon={<ArrowBackIcon />}
-          onClick={() => handleGraphViewChange("prev")}
-          aria-label="Previous View"
-          mr={2}
-        />
-        <Text fontWeight="bold" fontSize="lg">
-          {graphViews[graphViewIndex] === "total"
-            ? "Total Sales Forecast"
-            : "Category Breakdown"}
-        </Text>
-        <IconButton
-          icon={<ArrowForwardIcon />}
-          onClick={() => handleGraphViewChange("next")}
-          aria-label="Next View"
-          ml={2}
-        />
-      </Flex>
+          {/* KPI banner */}
+          <Box
+            mb={6}
+            p={4}
+            borderWidth="1px"
+            borderRadius="lg"
+            bg="white"
+            boxShadow="sm"
+            textAlign="center"
+          >
+            <Text fontWeight="semibold" color="gray.600" mb={1}>
+              Total Sales Forecast
+            </Text>
+            <Text fontSize="2xl" fontWeight="bold" color="green.500">
+              {forecast && forecast[0]?.sales !== undefined
+                ? `$${Number(forecast[0].sales).toLocaleString(undefined, { minimumFractionDigits: 2 })}`
+                : "--"}
+            </Text>
+          </Box>
 
-      <Box
-        mb={6}
-        p={4}
-        borderWidth="1px"
-        borderRadius="lg"
-        bg="white"
-        boxShadow="md"
-        textAlign="center"
+          {/* Toggle */}
+          <Flex justify="center" align="center" mb={4} gap={2}>
+            <IconButton
+              icon={<ArrowBackIcon />}
+              onClick={() => handleGraphViewChange("prev")}
+              aria-label="Previous View"
+              size="sm"
+            />
+            <Text fontWeight="bold" fontSize="lg">
+              {graphViews[graphViewIndex] === "total"
+                ? "Sales Growth + Forecast"
+                : "Category Breakdown"}
+            </Text>
+            <IconButton
+              icon={<ArrowForwardIcon />}
+              onClick={() => handleGraphViewChange("next")}
+              aria-label="Next View"
+              size="sm"
+            />
+          </Flex>
+
+          {/* Chart */}
+          <Box mb={6}>
+            {graphViews[graphViewIndex] === "total" ? (
+              <ForecastChart history={history} forecast={forecast} />
+            ) : (
+              <CategoryBreakdownChart history={history} />
+            )}
+          </Box>
+        </GridItem>
+
+        {/* RIGHT: sticky AI panel (hidden on mobile) */}
+        <GridItem display={{ base: "none", lg: "block" }}>
+          <Box position="sticky" top="80px">
+            <AIInsight
+              summary={summary}
+              loading={loadingInsight}
+              boxProps={{ maxH: "75vh", overflowY: "auto" }}
+            />
+          </Box>
+        </GridItem>
+      </Grid>
+
+      {/* Mobile FAB to open AI insight as a drawer */}
+      <Button
+        display={{ base: "inline-flex", lg: "none" }}
+        position="fixed"
+        right={4}
+        bottom={4}
+        colorScheme="purple"
+        onClick={drawer.onOpen}
       >
-        <Text fontSize="2xl" fontWeight="bold" color="green.500">
-          {forecastValue != null
-            ? `$${forecastValue.toLocaleString(undefined, {
-                minimumFractionDigits: 2,
-                maximumFractionDigits: 2,
-              })}`
-            : "--"}
-        </Text>
+        AI Insight
+      </Button>
 
-      </Box>
-
-      <Box mb={6}>
-        {graphViews[graphViewIndex] === "total" ? (
-          <ForecastChart history={history} forecast={forecast} />
-        ) : (
-          <CategoryBreakdownChart history={history} />
-        )}
-      </Box>
-
-      <AIInsight summary={summary} loading={loadingInsight} />
+      <Drawer isOpen={drawer.isOpen} placement="right" onClose={drawer.onClose} size="sm">
+        <DrawerOverlay />
+        <DrawerContent>
+          <DrawerHeader>AI Insight</DrawerHeader>
+          <DrawerBody>
+            <AIInsight summary={summary} loading={loadingInsight} />
+          </DrawerBody>
+        </DrawerContent>
+      </Drawer>
     </Container>
   );
 }
