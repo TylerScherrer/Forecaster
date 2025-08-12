@@ -3,9 +3,20 @@ import { useEffect, useState } from "react";
 import StoreSelector from "../components/StoreSelector";
 import { fetchStores } from "../api/storeService";
 import {
-  Box, Container, Flex, IconButton, Text,
-  Grid, GridItem, Button, useDisclosure, Drawer, DrawerBody,
-  DrawerContent, DrawerHeader, DrawerOverlay
+  Box,
+  Container,
+  Flex,
+  IconButton,
+  Text,
+  Grid,
+  GridItem,
+  Button,
+  useDisclosure,
+  Drawer,
+  DrawerBody,
+  DrawerContent,
+  DrawerHeader,
+  DrawerOverlay,
 } from "@chakra-ui/react";
 import { ArrowBackIcon, ArrowForwardIcon } from "@chakra-ui/icons";
 import ForecastChart from "../components/ForecastChart";
@@ -19,7 +30,7 @@ export default function Home() {
   const [selectedStore, setSelectedStore] = useState("");
   const [timeline, setTimeline] = useState([]);
   const [history, setHistory] = useState([]);
-  const [forecast, setForecast] = useState(null);
+  const [forecast, setForecast] = useState([]); // always an array
   const [summary, setSummary] = useState("");
   const [loadingInsight, setLoadingInsight] = useState(false);
 
@@ -27,21 +38,23 @@ export default function Home() {
   const [graphViewIndex, setGraphViewIndex] = useState(0);
   const drawer = useDisclosure();
 
+  // Load store list
   useEffect(() => {
     fetchStores()
       .then((data) => setStoreList(data))
       .catch((err) => console.error("❌ Failed to load stores:", err));
   }, []);
 
+  // Fetch forecast + history for selected store
   useEffect(() => {
     if (!selectedStore) return;
 
     fetch(`${BASE_URL}/api/forecast/${selectedStore}`)
       .then((res) => res.json())
       .then((data) => {
-        const historyData = data.history || [];
-        const forecastData = data.forecast || null;
-        const combinedTimeline = [...historyData, ...(forecastData ? [forecastData] : [])];
+        const historyData = Array.isArray(data.history) ? data.history : [];
+        const forecastData = Array.isArray(data.forecast) ? data.forecast : (data.forecast ? [data.forecast] : []);
+        const combinedTimeline = [...historyData, ...forecastData];
 
         setHistory(historyData);
         setForecast(forecastData);
@@ -52,6 +65,7 @@ export default function Home() {
       .catch((err) => console.error("❌ Failed to load forecast:", err));
   }, [selectedStore]);
 
+  // Get AI explanation
   const fetchAIInsight = async (timelineData) => {
     setLoadingInsight(true);
     try {
@@ -69,6 +83,7 @@ export default function Home() {
     setLoadingInsight(false);
   };
 
+  // Toggle chart view
   const handleGraphViewChange = (direction) => {
     const next =
       direction === "prev"
@@ -79,11 +94,10 @@ export default function Home() {
   };
 
   return (
-    <Container maxW="7xl" py={8}>
+    <Container maxW="7xl" py={6}>
       <Grid templateColumns={{ base: "1fr", lg: "2fr 1fr" }} gap={6} alignItems="start">
         {/* LEFT: controls, KPI, charts */}
         <GridItem>
-          {/* Store selector */}
           <Box mb={6}>
             <StoreSelector
               storeList={storeList}
@@ -95,25 +109,27 @@ export default function Home() {
           {/* KPI banner */}
           <Box
             mb={6}
-            p={4}
+            p={3}
             borderWidth="1px"
             borderRadius="lg"
             bg="white"
-            boxShadow="sm"
+            boxShadow="xs"
             textAlign="center"
           >
             <Text fontWeight="semibold" color="gray.600" mb={1}>
               Total Sales Forecast
             </Text>
             <Text fontSize="2xl" fontWeight="bold" color="green.500">
-              {forecast && forecast[0]?.sales !== undefined
-                ? `$${Number(forecast[0].sales).toLocaleString(undefined, { minimumFractionDigits: 2 })}`
+              {forecast[0]?.sales !== undefined
+                ? `$${Number(forecast[0].sales).toLocaleString(undefined, {
+                    minimumFractionDigits: 2,
+                  })}`
                 : "--"}
             </Text>
           </Box>
 
           {/* Toggle */}
-          <Flex justify="center" align="center" mb={4} gap={2}>
+          <Flex justify="center" align="center" mb={3} gap={2}>
             <IconButton
               icon={<ArrowBackIcon />}
               onClick={() => handleGraphViewChange("prev")}
@@ -136,26 +152,26 @@ export default function Home() {
           {/* Chart */}
           <Box mb={6}>
             {graphViews[graphViewIndex] === "total" ? (
-              <ForecastChart history={history} forecast={forecast} />
+              <ForecastChart history={history} forecast={forecast} height={360} />
             ) : (
               <CategoryBreakdownChart history={history} />
             )}
           </Box>
         </GridItem>
 
-        {/* RIGHT: sticky AI panel (hidden on mobile) */}
+        {/* RIGHT: sticky AI panel on desktop */}
         <GridItem display={{ base: "none", lg: "block" }}>
           <Box position="sticky" top="80px">
             <AIInsight
               summary={summary}
               loading={loadingInsight}
-              boxProps={{ maxH: "75vh", overflowY: "auto" }}
+              boxProps={{ maxH: "78vh", overflowY: "auto" }}
             />
           </Box>
         </GridItem>
       </Grid>
 
-      {/* Mobile FAB to open AI insight as a drawer */}
+      {/* Mobile FAB to open AI insight drawer */}
       <Button
         display={{ base: "inline-flex", lg: "none" }}
         position="fixed"
