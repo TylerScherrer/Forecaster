@@ -6,6 +6,10 @@ import os
 import requests
 
 explain_bp = Blueprint("explain_forecast", __name__)
+# --- at the top of your file (near imports / blueprint) ---
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
+# Recommended replacement for deprecated llama3-8b-8192
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 
 # ----------------------------
 # Helpers
@@ -129,13 +133,17 @@ def _build_prompt(
 # ----------------------------
 # Call Groq's Chat Completions API with robust error handling.
 # ----------------------------
-def _call_groq(prompt: str, model: str = "llama3-8b-8192", timeout: int = 20) -> Tuple[str, int]:
+# --- replace your current _call_groq(...) with this version ---
+def _call_groq(prompt: str, model: str | None = None, timeout: int = 20) -> Tuple[str, int]:
     api_key = os.environ.get("GROQ_API_KEY") or current_app.config.get("GROQ_API_KEY")
     if not api_key:
-        return ("GROQ_API_KEY is not set.", 498)  # custom-ish signal used above
+        return ("GROQ_API_KEY is not set.", 498)
+
+    # allow per-call override, else use env/default above
+    model = model or GROQ_MODEL
 
     payload = {
-        "model": model,
+        "model": model,  # now 'llama-3.1-8b-instant' by default
         "messages": [
             {"role": "system", "content": "You are a helpful retail analyst."},
             {"role": "user", "content": prompt},
@@ -149,12 +157,7 @@ def _call_groq(prompt: str, model: str = "llama3-8b-8192", timeout: int = 20) ->
     }
 
     try:
-        resp = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=timeout,
-        )
+        resp = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=timeout)
     except requests.Timeout:
         return ("The explanation service timed out. Please try again.", 504)
     except requests.RequestException as re:
@@ -165,10 +168,10 @@ def _call_groq(prompt: str, model: str = "llama3-8b-8192", timeout: int = 20) ->
 
     try:
         content = resp.json()["choices"][0]["message"]["content"]
+        return (content, 200)
     except Exception:
         return ("Groq API returned an unexpected response format.", 502)
 
-    return (content, 200)
 
 # ---- UPDATED: route (now parses `focus` and passes it) ----------------------
 
