@@ -66,7 +66,6 @@ def _find_index_by_date(pts: List[Dict[str, Any]], date_str: str) -> int:
     return -1
 
 def _render_focus_facts(pts: List[Dict[str, Any]], idx: int) -> str:
-    # window = [i-2, i-1, i, i+1] where available
     left2  = pts[idx-2] if idx-2 >= 0 else None
     left1  = pts[idx-1] if idx-1 >= 0 else None
     mid    = pts[idx]
@@ -76,24 +75,29 @@ def _render_focus_facts(pts: List[Dict[str, Any]], idx: int) -> str:
         return f"{p['date']},{p['value']:.2f},{p['source']}"
     lines = ["date,value,source"]
     for p in (left2, left1, mid, right1):
-        if p: lines.append(line(p))
-    # deltas vs previous month if available
+        if p:
+            lines.append(line(p))
+
+    # deltas vs previous months
     deltas = []
     if left1:
         dv = mid["value"] - left1["value"]
         pct = (dv / left1["value"] * 100.0) if left1["value"] else None
-        deltas.append(f"prev_vs_focus: {left1['date']} → {mid['date']}, dv:{dv:.2f}, pct:{'NA' if pct is None else f'{pct:.2f}'}")
+        pct_str = "NA" if pct is None else f"{pct:.2f}"
+        deltas.append(f"prev_vs_focus: {left1['date']} → {mid['date']}, dv:{dv:.2f}, pct:{pct_str}")
     if left2 and left1:
-        # 2-step change (left2 -> mid) for more context
         dv = mid["value"] - left2["value"]
         pct = (dv / left2["value"] * 100.0) if left2["value"] else None
-        deltas.append(f"prev2_vs_focus: {left2['date']} → {mid['date']}, dv:{dv:.2f}, pct:{'NA' if pct is None else f'{pct:.2f}'}")
+        pct_str = "NA" if pct is None else f"{pct:.2f}"
+        deltas.append(f"prev2_vs_focus: {left2['date']} → {mid['date']}, dv:{dv:.2f}, pct:{pct_str}")
     if right1:
         dv = right1["value"] - mid["value"]
         pct = (dv / mid["value"] * 100.0) if mid["value"] else None
-        deltas.append(f"focus_vs_next: {mid['date']} → {right1['date']}, dv:{dv:.2f}, pct:{'NA' if pct is None else f'{pct:.2f}'}")
+        pct_str = "NA" if pct is None else f"{pct:.2f}"
+        deltas.append(f"focus_vs_next: {mid['date']} → {right1['date']}, dv:{dv:.2f}, pct:{pct_str}")
 
     return "FOCUS_ROWS (CSV):\n" + "\n".join(lines) + ("\n" + "\n".join(deltas) if deltas else "")
+
 
 def _render_global_facts(pts: List[Dict[str, Any]]) -> str:
     pr = _pairs(pts)
