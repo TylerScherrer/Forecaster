@@ -1,33 +1,20 @@
+# backend/routes/explain_forecast.py
 from __future__ import annotations
 
 from flask import Blueprint, request, jsonify, current_app
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 import os
 import requests
+from datetime import datetime
 
 explain_bp = Blueprint("explain_forecast", __name__)
-# --- at the top of your file (near imports / blueprint) ---
+
+# --------- Model config ----------
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
-# Recommended replacement for deprecated llama3-8b-8192
-GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+GROQ_MODEL   = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 
-# ----------------------------
-# Helpers
-# ----------------------------
 
-# ----------------------------
-# Safely extract the timeline array from either supported input shape.
-# Input:
-#   - data (Any): JSON body from POST (either a list of records OR { "timeline": [...] })
-#
-# Returns:
-#   - List[Dict[str, Any]]: The extracted timeline list
-#
-# Details:
-#   1. If body is a list, treat it as the timeline.
-#   2. If body is a dict with "timeline", use that.
-#   3. Otherwise, raise a ValueError with a descriptive message.
-# ----------------------------
+# --------- helpers ----------
 def _extract_timeline(data: Any) -> List[Dict[str, Any]]:
     if isinstance(data, list):
         timeline = data
@@ -35,175 +22,184 @@ def _extract_timeline(data: Any) -> List[Dict[str, Any]]:
         timeline = data["timeline"]
     else:
         raise ValueError("Expected a list or an object with a 'timeline' key.")
-    if not isinstance(timeline, list) or len(timeline) < 1:
+    if not isinstance(timeline, list) or not timeline:
         raise ValueError("Timeline must be a non-empty list.")
     return timeline
 
-
-
-# ---- NEW helpers ------------------------------------------------------------
-
-def _pick_sales_value(entry: Dict[str, Any]) -> float | None:
-    """Return a numeric sales value from many possible keys; None if not found."""
+def _pick_value(entry: Dict[str, Any]) -> Optional[float]:
     for k in ("total", "total_sales", "sales", "value", "amount", "y", "sum", "pred", "predicted"):
         if k in entry:
-            v = entry[k]
             try:
-                return float(v)
+                return float(entry[k])
             except (TypeError, ValueError):
                 return None
     return None
 
-def _fmt_usd(n: float) -> str:
-    return f"${n:,.0f}"  # whole dollars is fine for UI
-
-
-
-# ----------------------------
-# Build a friendly, concise prompt for the LLM from a slice of the timeline.
-# Input:
-#   - timeline (List[Dict]): The full timeline
-#   - last_n (int): How many final points to include (default: 4)
-#
-# Returns:
-#   - str: Prompt text ready to send to the LLM
-#
-# Details:
-#   1. Grab the last N entries from the timeline.
-#   2. Detect whether entries use 'sales' or 'total_sales'.
-#   3. Format lines like "YYYY-MM-DD: $1234.56".
-#   4. Compose an instruction for a store manager audience.
-# ----------------------------
-# ---- UPDATED: build prompt (now accepts focus) ------------------------------
-
-def _build_prompt(
-    timeline: List[Dict[str, Any]],
-    last_n: int = 4,
-    focus: Dict[str, Any] | None = None,
-) -> str:
-    """Build a short, manager-friendly prompt from the timeline.
-       If `focus` is provided, center the window around that point."""
-    if not isinstance(timeline, list) or not timeline:
-        raise ValueError("Timeline must be a non-empty list.")
-
-    # Defensive: sort by date (string ISO works lexicographically)
-    tl = [t for t in timeline if isinstance(t, dict) and "date" in t]
-    tl.sort(key=lambda x: x["date"])
-
-    # Decide which slice to use
-    if focus and "date" in focus:
-        # center a small window around the focused date (2 before, 1 after)
-        idx = next((i for i, r in enumerate(tl) if r.get("date") == focus["date"]), None)
-        if idx is None:
-            window = tl[-last_n:]
-        else:
-            start = max(0, idx - 2)
-            end = min(len(tl), idx + 2)  # exclusive
-            window = tl[start:end]
-    else:
-        window = tl[-last_n:]
-
-    lines: List[str] = []
-    for entry in window:
-        val = _pick_sales_value(entry)
-        if val is None:
+def _norm_points(timeline: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    pts = []
+    for t in timeline:
+        d = str(t.get("date") or "")[:10]
+        v = _pick_value(t)
+        if not d or v is None:
             continue
-        src = entry.get("source")  # 'history' or 'forecast' if provided by FE
-        tag = "forecast" if src == "forecast" else "actual"
-        lines.append(f"{entry['date']}: {_fmt_usd(val)} ({tag})")
+        pts.append({"date": d, "value": float(v), "source": t.get("source", "history")})
+    pts.sort(key=lambda x: x["date"])
+    return pts
 
-    if not lines:
-        raise ValueError("No usable numeric values found in the timeline.")
+def _pairs(pts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    out = []
+    for i in range(1, len(pts)):
+        a, b = pts[i-1], pts[i]
+        dv = b["value"] - a["value"]
+        pct = (dv / a["value"] * 100.0) if a["value"] else None
+        out.append({
+            "from_date": a["date"], "to_date": b["date"],
+            "from_value": a["value"], "to_value": b["value"],
+            "to_source": b["source"], "dv": dv, "pct": pct
+        })
+    return out
 
-    focus_txt = ""
-    if focus and "date" in focus and "value" in focus:
-        f_src = focus.get("source", "actual")
-        focus_txt = (
-            f"\nFocus on what changed around {focus['date']} "
-            f"({f_src}: {_fmt_usd(float(focus['value']))})."
+def _find_index_by_date(pts: List[Dict[str, Any]], date_str: str) -> int:
+    for i, p in enumerate(pts):
+        if p["date"][:10] == str(date_str)[:10]:
+            return i
+    return -1
+
+def _render_focus_facts(pts: List[Dict[str, Any]], idx: int) -> str:
+    # window = [i-2, i-1, i, i+1] where available
+    left2  = pts[idx-2] if idx-2 >= 0 else None
+    left1  = pts[idx-1] if idx-1 >= 0 else None
+    mid    = pts[idx]
+    right1 = pts[idx+1] if idx+1 < len(pts) else None
+
+    def line(p):
+        return f"{p['date']},{p['value']:.2f},{p['source']}"
+    lines = ["date,value,source"]
+    for p in (left2, left1, mid, right1):
+        if p: lines.append(line(p))
+    # deltas vs previous month if available
+    deltas = []
+    if left1:
+        dv = mid["value"] - left1["value"]
+        pct = (dv / left1["value"] * 100.0) if left1["value"] else None
+        deltas.append(f"prev_vs_focus: {left1['date']} → {mid['date']}, dv:{dv:.2f}, pct:{'NA' if pct is None else f'{pct:.2f}'}")
+    if left2 and left1:
+        # 2-step change (left2 -> mid) for more context
+        dv = mid["value"] - left2["value"]
+        pct = (dv / left2["value"] * 100.0) if left2["value"] else None
+        deltas.append(f"prev2_vs_focus: {left2['date']} → {mid['date']}, dv:{dv:.2f}, pct:{'NA' if pct is None else f'{pct:.2f}'}")
+    if right1:
+        dv = right1["value"] - mid["value"]
+        pct = (dv / mid["value"] * 100.0) if mid["value"] else None
+        deltas.append(f"focus_vs_next: {mid['date']} → {right1['date']}, dv:{dv:.2f}, pct:{'NA' if pct is None else f'{pct:.2f}'}")
+
+    return "FOCUS_ROWS (CSV):\n" + "\n".join(lines) + ("\n" + "\n".join(deltas) if deltas else "")
+
+def _render_global_facts(pts: List[Dict[str, Any]]) -> str:
+    pr = _pairs(pts)
+    rows = ["PAIRS (from,to,from_val,to_val,dv,pct,to_source)"]
+    for r in pr:
+        rows.append(
+            f"{r['from_date']},{r['to_date']},{r['from_value']:.2f},{r['to_value']:.2f},{r['dv']:.2f},{'NA' if r['pct'] is None else f'{r['pct']:.2f}'},{r['to_source']}"
         )
+    return "\n".join(rows)
 
-    return (
-        "You are a helpful retail analyst. A store manager needs a simple explanation.\n"
-        "Use plain language, 2–3 short bullet points max. Be concrete and actionable.\n\n"
-        "Recent points (date: value):\n"
-        + "\n".join(lines)
-        + focus_txt
-    )
-# ----------------------------
-# Call Groq's Chat Completions API with robust error handling.
-# ----------------------------
-# --- replace your current _call_groq(...) with this version ---
-def _call_groq(prompt: str, model: str | None = None, timeout: int = 20) -> Tuple[str, int]:
+def _build_prompt_total(timeline: List[Dict[str, Any]], focus: Optional[Dict[str, Any]]) -> str:
+    pts = _norm_points(timeline)
+    if not pts:
+        raise ValueError("No usable timeline points.")
+
+    # keep a compact, recent window to reduce drift
+    pts = pts[-18:]
+
+    # ---------- FOCUS MODE ----------
+    if focus and focus.get("date"):
+        idx = _find_index_by_date(pts, str(focus["date"]))
+        if idx == -1:
+            idx = len(pts) - 1  # fallback to most recent if not found
+        ff = _render_focus_facts(pts, idx)
+        mid = pts[idx]  # the actual row we consider "focus"
+
+        return f"""You are a careful retail analyst.
+
+FOCUS_DATE: {mid['date']}
+FOCUS_SOURCE: {mid['source']}
+
+{ff}
+
+STRICT RULES:
+- Treat each change as (to_value - from_value) for the exact dates shown. Do not shift or infer months.
+- Only discuss the FOCUS_DATE month; do NOT summarize other months.
+- If FOCUS_SOURCE == "forecast", append " (forecast)" after that month's name when you mention it.
+
+TASK:
+- Write exactly 3 bullets about the FOCUS month only, quantifying changes vs the previous month (and previous-2 if present) using the dv/pct already listed in FOCUS_ROWS.
+- Add one bullet comparing the focus value to the local 3–4 month neighborhood shown in FOCUS_ROWS (high/low/outlier).
+- Finish with **Next actions:** and exactly 2 short, data-specific actions tied to the focus month.
+- Markdown bullets only; no preamble.
+"""
+
+    # ---------- GLOBAL MODE ----------
+    gf = _render_global_facts(pts)
+    return f"""You are a precise retail analyst.
+
+{gf}
+
+STRICT RULES:
+- Each change refers to the PAIR 'from_date → to_date' and its dv/pct exactly as listed; do not realign or offset months.
+- If a pair's to_source == "forecast", append "(forecast)" after the TO month when referenced.
+
+TASK:
+- In 3–5 bullets, summarize the key month-to-month changes using the PAIRS.
+- Name the single largest rise and the single largest drop.
+- Finish with **Next actions:** and exactly 2 data-specific actions.
+- Markdown bullets only; no preamble.
+"""
+
+
+def _call_groq(prompt: str, timeout: int = 20) -> Tuple[str, int]:
     api_key = os.environ.get("GROQ_API_KEY") or current_app.config.get("GROQ_API_KEY")
     if not api_key:
         return ("GROQ_API_KEY is not set.", 498)
-
-    # allow per-call override, else use env/default above
-    model = model or GROQ_MODEL
-
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     payload = {
-        "model": model,  # now 'llama-3.1-8b-instant' by default
+        "model": GROQ_MODEL,
         "messages": [
-            {"role": "system", "content": "You are a helpful retail analyst."},
+            {"role": "system", "content": "You are a precise retail analyst. Be numeric and concrete."},
             {"role": "user", "content": prompt},
         ],
-        "temperature": 0.7,
-        "max_tokens": 300,
+        "temperature": 0.2,
+        "max_tokens": 700,
     }
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-
     try:
-        resp = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=timeout)
+        r = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=timeout)
     except requests.Timeout:
         return ("The explanation service timed out. Please try again.", 504)
-    except requests.RequestException as re:
-        return (f"Network error calling Groq: {re}", 502)
-
-    if resp.status_code != 200:
-        return (f"Groq API error ({resp.status_code}): {resp.text}", resp.status_code)
-
+    except requests.RequestException as e:
+        return (f"Network error calling Groq: {e}", 502)
+    if r.status_code != 200:
+        return (f"Groq API error ({r.status_code}): {r.text}", r.status_code)
     try:
-        content = resp.json()["choices"][0]["message"]["content"]
-        return (content, 200)
+        return (r.json()["choices"][0]["message"]["content"], 200)
     except Exception:
         return ("Groq API returned an unexpected response format.", 502)
 
-
-# ---- UPDATED: route (now parses `focus` and passes it) ----------------------
 
 @explain_bp.route("/api/explain_forecast", methods=["POST"])
 def explain_forecast():
     try:
         data = request.get_json(silent=True)
-        current_app.logger.debug("Raw incoming data type: %s", type(data))
-
         timeline = _extract_timeline(data)
-        current_app.logger.debug("Timeline len: %s", len(timeline))
-
-        # NEW: accept optional focus hint from frontend
         focus = None
-        if isinstance(data, dict):
-            f = data.get("focus")
-            if isinstance(f, dict):
-                focus = {k: f.get(k) for k in ("date", "value", "source")}
-
-        prompt = _build_prompt(timeline, last_n=4, focus=focus)
-
+        if isinstance(data, dict) and isinstance(data.get("focus"), dict):
+            f = data["focus"]
+            focus = {k: f.get(k) for k in ("date", "value", "source")}
+        prompt = _build_prompt_total(timeline, focus=focus)
         text, status = _call_groq(prompt)
         if status != 200:
             current_app.logger.error("Groq call failed: %s", text)
-            if status == 498:
-                return jsonify({"error": "Server is missing GROQ_API_KEY"}), 500
-            return jsonify({"error": "Groq model request failed"}), 502
-
-        explanation = (text or "").strip()
-        current_app.logger.info("AI Explanation generated (%d chars)", len(explanation))
-        return jsonify({"summary": explanation}), 200
-
+            return jsonify({"summary": "* Unable to generate insight at the moment."}), 200
+        return jsonify({"summary": (text or "").strip()}), 200
     except ValueError as ve:
         current_app.logger.warning("Bad request to /api/explain_forecast: %s", ve)
         return jsonify({"error": str(ve)}), 400
