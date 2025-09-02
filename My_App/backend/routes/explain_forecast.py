@@ -99,10 +99,14 @@ def _render_global_facts(pts: List[Dict[str, Any]]) -> str:
     pr = _pairs(pts)
     rows = ["PAIRS (from,to,from_val,to_val,dv,pct,to_source)"]
     for r in pr:
+        pct_str = "NA" if r["pct"] is None else f"{r['pct']:.2f}"
         rows.append(
-            f"{r['from_date']},{r['to_date']},{r['from_value']:.2f},{r['to_value']:.2f},{r['dv']:.2f},{'NA' if r['pct'] is None else f'{r['pct']:.2f}'},{r['to_source']}"
+            f"{r['from_date']},{r['to_date']},"
+            f"{r['from_value']:.2f},{r['to_value']:.2f},"
+            f"{r['dv']:.2f},{pct_str},{r['to_source']}"
         )
     return "\n".join(rows)
+
 
 def _build_prompt_total(timeline: List[Dict[str, Any]], focus: Optional[Dict[str, Any]]) -> str:
     pts = _norm_points(timeline)
