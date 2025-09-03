@@ -181,14 +181,7 @@ export default function ForecastChart({
     [data]
   );
 
-  const handleLineClick = useCallback(
-    (d, idx) => {
-      if (!onPointSelect || !d) return;
-      const pt = { date: d.date, label: d.label, value: d.y, source: d.source || "history" };
-      onPointSelect(pt);
-    },
-    [onPointSelect]
-  );
+
 
   const handleChartClick = useCallback(
     (e) => {
