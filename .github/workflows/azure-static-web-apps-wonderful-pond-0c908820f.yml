@@ -12,13 +12,12 @@ jobs:
     if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.action != 'closed')
     runs-on: ubuntu-latest
     permissions:
-      id-token: write
+      id-token: write   # <-- REQUIRED for OIDC
       contents: read
 
     steps:
       - uses: actions/checkout@v4
 
-      # Node + npm cache for the frontend
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -26,17 +25,24 @@ jobs:
           cache: 'npm'
           cache-dependency-path: My_App/frontend/package-lock.json
 
-      # Build the React app
       - name: Build frontend
         working-directory: My_App/frontend
         run: |
           npm ci
           npm run build
-        # Remove CI:false once your ESLint warning is fixed
         env:
-          CI: false
+          CI: false   # keep until you fix the eslint warning
 
-      # Deploy the already-built artifacts to SWA via OIDC (no token needed)
+      # Fetch a GitHub OIDC ID token for the SWA action
+      - name: Get GitHub OIDC ID token
+        id: oidc
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const core = require('@actions/core');
+            const tok = await core.getIDToken();
+            core.setOutput('token', tok);
+
       - name: Deploy to Azure Static Web Apps
         uses: Azure/static-web-apps-deploy@v1
         with:
@@ -44,12 +50,12 @@ jobs:
           app_location: My_App/frontend
           output_location: build
           skip_app_build: true
+          github_id_token: ${{ steps.oidc.outputs.token }}  # <-- OIDC auth
 
   close_pr:
     if: github.event_name == 'pull_request' && github.event.action == 'closed'
     runs-on: ubuntu-latest
     steps:
-      - name: Close PR environment
-        uses: Azure/static-web-apps-deploy@v1
+      - uses: Azure/static-web-apps-deploy@v1
         with:
           action: close
