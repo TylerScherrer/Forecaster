@@ -12,7 +12,7 @@ jobs:
     if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.action != 'closed')
     runs-on: ubuntu-latest
     permissions:
-      id-token: write   # <-- REQUIRED for OIDC
+      id-token: write   # required for OIDC
       contents: read
 
     steps:
@@ -27,21 +27,19 @@ jobs:
 
       - name: Build frontend
         working-directory: My_App/frontend
+        env:
+          CI: false   # keep until you fix the eslint warning
         run: |
           npm ci
           npm run build
-        env:
-          CI: false   # keep until you fix the eslint warning
 
-      # Fetch a GitHub OIDC ID token for the SWA action
       - name: Get GitHub OIDC ID token
         id: oidc
         uses: actions/github-script@v7
         with:
           script: |
-            const core = require('@actions/core');
-            const tok = await core.getIDToken();
-            core.setOutput('token', tok);
+            const token = await core.getIDToken();
+            core.setOutput('token', token);
 
       - name: Deploy to Azure Static Web Apps
         uses: Azure/static-web-apps-deploy@v1
@@ -50,7 +48,7 @@ jobs:
           app_location: My_App/frontend
           output_location: build
           skip_app_build: true
-          github_id_token: ${{ steps.oidc.outputs.token }}  # <-- OIDC auth
+          github_id_token: ${{ steps.oidc.outputs.token }}
 
   close_pr:
     if: github.event_name == 'pull_request' && github.event.action == 'closed'
