@@ -1,29 +1,121 @@
 from __future__ import annotations
 
-from typing import List, Dict, Iterable
+import os, json, logging
+from typing import List, Dict, Iterable, Tuple
 import pandas as pd
+import joblib
 
 # ----------------------------
-# Helpers
+# Cache / blob config
+# ----------------------------
+CACHE_DIR = os.environ.get("DATA_CACHE", "/home/site/data")
+os.makedirs(CACHE_DIR, exist_ok=True)
+
+FEATURES_PATH = os.path.join(CACHE_DIR, "features.csv")
+MODEL_PATH    = os.path.join(CACHE_DIR, "model.pkl")
+META_PATH     = os.path.join(CACHE_DIR, "artifacts.meta.json")  # stores etags
+
+# Blob locations (env overrides optional)
+ARTIFACTS_CONTAINER = os.environ.get("ARTIFACTS_CONTAINER", "artifacts")
+FEATURES_BLOB_NAME  = os.environ.get("FEATURES_BLOB", "features.csv")
+MODEL_BLOB_NAME     = os.environ.get("MODEL_BLOB", "model.pkl")
+AZ_CONN_STR         = os.environ.get("AZURE_STORAGE_CONNECTION_STRING")
+
+_logger = logging.getLogger("backend.init")
+
+def _read_meta() -> Dict[str, str]:
+    try:
+        with open(META_PATH, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def _write_meta(meta: Dict[str, str]) -> None:
+    tmp = META_PATH + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(meta, f)
+    os.replace(tmp, META_PATH)
+
+def _get_container():
+    from azure.storage.blob import BlobServiceClient
+    if not AZ_CONN_STR:
+        raise ValueError("AZURE_STORAGE_CONNECTION_STRING not set")
+    svc = BlobServiceClient.from_connection_string(AZ_CONN_STR)
+    return svc.get_container_client(ARTIFACTS_CONTAINER)
+
+def _ensure_blob(container, blob_name: str, dest_path: str) -> str:
+    """
+    Ensure blob is present locally at dest_path. Uses ETag to avoid re-download.
+    """
+    bc = container.get_blob_client(blob_name)
+    props = bc.get_blob_properties()
+    etag = props.etag
+
+    meta = _read_meta()
+    if os.path.exists(dest_path) and meta.get(blob_name) == etag:
+        _logger.info(f"[backend:init] Using cached {blob_name}: {dest_path}")
+        return dest_path
+
+    _logger.info(f"[backend:init] Downloading '{blob_name}' to '{dest_path}'...")
+    data = bc.download_blob().readall()
+    tmp = dest_path + ".downloading"
+    with open(tmp, "wb") as f:
+        f.write(data)
+    os.replace(tmp, dest_path)
+    meta[blob_name] = etag
+    _write_meta(meta)
+    _logger.info(f"[backend:init] Wrote {len(data):,} bytes to {dest_path}")
+    return dest_path
+
+def _load_df_and_model() -> Tuple[pd.DataFrame, object]:
+    """
+    Download (if needed) and load artifacts, returning (df, model).
+    """
+    container = _get_container()
+    features_file = _ensure_blob(container, FEATURES_BLOB_NAME, FEATURES_PATH)
+    model_file    = _ensure_blob(container, MODEL_BLOB_NAME, MODEL_PATH)
+
+    df = pd.read_csv(features_file)
+    model = joblib.load(model_file)  # xgboost/sklearn wrapper is fine
+    return df, model
+
+def load_artifacts_into_config(cfg) -> None:
+    """
+    Public entry point called at app startup.
+    Populates cfg['df'], cfg['model'], cfg['model_features'], cfg['category_features'].
+    """
+    df, model = _load_df_and_model()
+
+    # Best-effort feature extraction; OK if empty (routes fill missing with 0s)
+    model_feats: List[str] = []
+    for attr in ("feature_names_in_", "get_booster"):
+        if hasattr(model, attr):
+            if attr == "feature_names_in_":
+                try:
+                    model_feats = list(getattr(model, attr))  # sklearn API
+                except Exception:
+                    pass
+            elif attr == "get_booster":
+                try:
+                    booster = model.get_booster()
+                    # Booster.feature_names may be None depending on how it was saved
+                    if getattr(booster, "feature_names", None):
+                        model_feats = list(booster.feature_names)
+                except Exception:
+                    pass
+    cat_feats = [c for c in df.columns if c.endswith("_Sales")]
+
+    cfg["df"] = df
+    cfg["model"] = model
+    cfg["model_features"] = model_feats
+    cfg["category_features"] = cat_feats
+    _logger.info("[backend:init] Artifacts loaded into app.config")
+
+# ----------------------------
+# Your existing helpers (unchanged)
 # ----------------------------
 
-
-# ----------------------------
-# Validates that all required objects for the app exist and are correctly formatted.
-# Input:
-#   - cfg: A Flask config object (dictionary-like) that holds app-wide data and settings
-#
-# Returns:
-#   - None (raises ValueError if validation fails)
-#
-# Details:
-#   1. Retrieve `df`, `model`, and `model_features` from the config.
-#   2. If any are missing (None), raise a ValueError.
-#   3. Verify that `df` is a Pandas DataFrame.
-#   4. Ensure that the DataFrame contains the required columns: "Date" and "Total_Sales".
-#   5. If any check fails, stop execution by raising a ValueError with a descriptive message.
-# ----------------------------
-def _ensure_required_objects(cfg) -> None:  # cfg is a box holding all your app’s important objects so you can check them in one place
+def _ensure_required_objects(cfg) -> None:
     """
     Raise a ValueError if required objects weren't loaded into app.config.
     """
@@ -37,160 +129,45 @@ def _ensure_required_objects(cfg) -> None:  # cfg is a box holding all your app�
     if "Date" not in df.columns or "Total_Sales" not in df.columns:
         raise ValueError("DataFrame must contain 'Date' and 'Total_Sales' columns")
 
-
-# ----------------------------
-# Input: Pandas DataFrame containing store data
-# Returns: An iterable (generator) that yields one dictionary per unique store.
-#          Instead of building a full list of stores in memory, it produces them
-#          one at a time as you loop through, keeping memory use low and allowing
-#          processing to begin immediately.
-#
-# 1. Define the target columns we care about: "Store Number", "City", "County"
-# 2. Check which of those target columns actually exist in the DataFrame
-# 3. Create a smaller DataFrame with only available columns
-# 4. Remove rows with missing values in those columns
-# 5. Remove duplicate store entries so each store appears once
-# 6. Sort the stores by "Store Number" in ascending order
-# 7. Loop through each row and yield a dictionary:
-#    - store_id: int version of "Store Number"
-#    - city: uppercase string of "City"
-#    - county: uppercase string of "County"
-# ----------------------------
 def _iter_unique_stores(df: pd.DataFrame) -> Iterable[Dict]:
-    """
-    Yield unique store records with basic identity fields.
-    """
-    cols = ["Store Number", "City", "County"]  # List of columns we want
-    available = [c for c in cols if c in df.columns]  # Filtered list of only those columns that exist in df
-    stores = (  # Building a clean store list
-        df[available]  # Take only the relevant columns we found
-        .dropna()  # Remove rows that are missing values
-        .drop_duplicates()  # Remove duplicates
-        .sort_values("Store Number")  # Sort the store in ascending order
+    cols = ["Store Number", "City", "County"]
+    available = [c for c in cols if c in df.columns]
+    stores = (
+        df[available]
+        .dropna()
+        .drop_duplicates()
+        .sort_values("Store Number")
     )
-    for _, row in stores.iterrows():  # Loops through the DataFrame row by row
-        yield {  # yield is like return, but instead of ending the function, it pauses it so it can produce multiple results over time.
-            "store_id": int(row["Store Number"]),  # Convert store_id to int
-            "city": str(row.get("City", "")).upper(),  # Convert city to string
-            "county": str(row.get("County", "")).upper(),  # Convert country to string
+    for _, row in stores.iterrows():
+        yield {
+            "store_id": int(row["Store Number"]),
+            "city": str(row.get("City", "")).upper(),
+            "county": str(row.get("County", "")).upper(),
         }
 
-
-# ----------------------------
-# Allows the caller to filter the DataFrame for a specific store and minimum year.
-# Input:
-#   - df (Pandas DataFrame): The complete dataset containing sales data for all stores
-#   - store_id (int): The store number to filter for
-#   - min_year (int): The earliest year of sales data to include
-#
-# Returns:
-#   - A new Pandas DataFrame containing only rows for the specified store
-#     and only dates on or after the given min_year.
-#
-# Details:
-#   1. Select only rows where "Store Number" matches the given store_id.
-#   2. Convert the "Date" column to proper datetime objects for safe filtering.
-#   3. Drop any rows where "Date" could not be parsed.
-#   4. If a min_year is provided, filter out all rows before that year.
-#   5. Return the cleaned, filtered DataFrame for further processing.
-#
-# ----------------------------
-def _prepare_store_timeseries(
-    df: pd.DataFrame,
-    store_id: int,
-    min_year: int,
-) -> pd.DataFrame:
-    """
-    Return the per-row store dataframe filtered to min_year+ and with Date parsed.
-    """
-    store_df = df[df["Store Number"] == store_id].copy()  # Take only the rows from the master dataset where the store number equals the store_id we’re looking for, and work with a separate copy of that data.
-    if store_df.empty:  # If our filtered DataFrame is empty, it means there were no matching rows, return the dataframe
+def _prepare_store_timeseries(df: pd.DataFrame, store_id: int, min_year: int) -> pd.DataFrame:
+    store_df = df[df["Store Number"] == store_id].copy()
+    if store_df.empty:
         return store_df
-    store_df["Date"] = pd.to_datetime(store_df["Date"], errors="coerce")  # Convert the "Date" column to proper datetime objects for safe filtering.
+    store_df["Date"] = pd.to_datetime(store_df["Date"], errors="coerce")
     store_df = store_df.dropna(subset=["Date"])
     if min_year is not None:
         store_df = store_df[store_df["Date"].dt.year >= min_year]
     return store_df
 
-
-# ----------------------------
-# Checks whether a store has sales data for at least a given number of unique months.
-# Input:
-#   - store_df (Pandas DataFrame): Sales data for a single store
-#   - min_points (int): The minimum number of distinct months required
-#
-# Returns:
-#   - True if the store has sales data for at least `min_points` unique months,
-#     otherwise False.
-#
-# Details:
-#   1. If the DataFrame is empty, return False immediately.
-#   2. Create a new "YearMonth" column by converting the "Date" column to
-#      year-month periods and back to timestamps representing the first day
-#      of that month.
-#   3. Group the data by "YearMonth" and sum the "Total_Sales" for each month.
-#   4. Count the number of unique months and compare it to `min_points`.
-#   5. Return True if the count is greater than or equal to `min_points`,
-#      otherwise False.
-# ----------------------------
 def _has_min_months(store_df: pd.DataFrame, min_points: int) -> bool:
-    """
-    Check if a store has at least `min_points` monthly aggregates since the cutoff.
-    """
-    if store_df.empty:  # If the DataFrame is empty (no rows for that store), the store clearly doesn’t have enough months of data, so it returns False immediately
+    if store_df.empty:
         return False
     monthly = (
-        store_df.assign(YearMonth=store_df["Date"].dt.to_period("M").dt.to_timestamp())  # This creates a new column called YearMonth without overwriting the original DataFrame.
-        # .dt.to_period("M") turns the full date into just the year-month period (e.g., 2024-05-15 → 2024-05).
-        # .dt.to_timestamp() converts that back into a normal datetime at the start of that month (2024-05-01).
-
-        # So now YearMonth contains the month each row belongs to.
-        # Date                          Total_Sales             YearMonth
-        # 2024-01-15                     1500.00                2024-01-01
-        # 2024-01-28                     2000.00                2024-01-01
-        # 2024-02-02                     2500.00                2024-02-01
-        .groupby("YearMonth")["Total_Sales"]  # Groups all rows for the same month together.
-        .sum()  # Sums Total_Sales for that month so each month is a single value.
+        store_df.assign(YearMonth=store_df["Date"].dt.to_period("M").dt.to_timestamp())
+        .groupby("YearMonth")["Total_Sales"]
+        .sum()
     )
     return len(monthly) >= min_points
-    # monthly here is a Pandas Series where the index is YearMonth.
-    # len(monthly) tells us how many unique months have sales data.
-    # If that count is greater than or equal to the required min_points (e.g., 5 months), return True; otherwise False.
 
-
-# ----------------------------
-# Generates a single forecast value using the most recent store data row.
-# Input:
-#   - model: A trained machine learning model with a .predict() method
-#   - latest_row (Pandas DataFrame): A single-row DataFrame containing the most
-#       recent data for the store
-#   - features (List[str]): The list of feature column names expected by the model
-#
-# Returns:
-#   - float: The predicted value (rounded to 2 decimal places) for the given row
-#
-# Details:
-#   1. Loop through each feature in the `features` list.
-#   2. If a feature column is missing from `latest_row`, add it and fill with 0.
-#   3. Select only the feature columns from `latest_row` in the correct order.
-#   4. Call `model.predict()` on this row to generate the forecast.
-#   5. Convert the prediction to a Python float, round to 2 decimals, and return it.
-# ----------------------------
-def _predict_preview(
-    model,
-    latest_row: pd.DataFrame,
-    features: List[str],
-) -> float:
-    """
-    Predict a single-step preview from the latest available row.
-    Missing features are filled with 0.
-    """
+def _predict_preview(model, latest_row: pd.DataFrame, features: List[str]) -> float:
     for col in features:
         if col not in latest_row.columns:
             latest_row[col] = 0
-    # latest_row[features] → selects only the columns the model was trained with, in the right order.
-    # model.predict(...) → returns a NumPy array of predictions (even though we only gave it one row).
-    # [0] → takes the first prediction from that array.
-    # float(...) → converts from NumPy float to a standard Python float.
     yhat = float(model.predict(latest_row[features])[0])
     return round(yhat, 2)
