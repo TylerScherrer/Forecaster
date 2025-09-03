@@ -16,7 +16,7 @@ store_bp = Blueprint("store", __name__)
 
 # In-memory cache (keeps first load fast across refreshes)
 _STORES_CACHE: Dict[Tuple, Tuple[float, List[Dict]]] = {}
-_CACHE_TTL_SEC = 60  # bump to 300 if you want
+_CACHE_TTL_SEC = 600  # bump to 300 if you want
 
 # ----------------------------- normalization ------------------------------
 
